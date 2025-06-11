@@ -1,0 +1,138 @@
+name: LLM PR Reviewer
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+  workflow_dispatch: # Allow manual triggering for testing
+
+jobs:
+  llm-review:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Setup cache for Ollama models
+        uses: actions/cache@v4
+        with:
+          path: ~/.ollama
+          key: ollama-models-${{ runner.os }}-gemma3-1b-v1
+          restore-keys: |
+            ollama-models-${{ runner.os }}-
+      
+      - name: Start Ollama service
+        run: |
+          echo "Starting Ollama service..."
+          docker run -d \
+            --name ollama-service \
+            -p 11434:11434 \
+            -v ~/.ollama:/root/.ollama \
+            ollama/ollama:latest
+          
+          echo "Waiting for Ollama service to be ready..."
+          timeout 120s bash -c 'until curl -s http://localhost:11434/api/tags >/dev/null 2>&1; do 
+            echo "Waiting for Ollama to start..."
+            sleep 3
+          done'
+          echo "Ollama service is ready!"
+      
+      - name: Check if gemma3:1b model exists
+        id: check-model
+        run: |
+          echo "Checking if gemma3:1b model exists..."
+          models=$(curl -s http://localhost:11434/api/tags)
+          echo "Available models response: $models"
+          
+          if echo "$models" | grep -q "gemma3:1b"; then
+            echo "model_exists=true" >> $GITHUB_OUTPUT
+            echo "✅ Model gemma3:1b already exists in cache"
+          else
+            echo "model_exists=false" >> $GITHUB_OUTPUT
+            echo "❌ Model gemma3:1b not found, will download"
+          fi
+      
+      - name: Download gemma3:1b model if not cached
+        if: steps.check-model.outputs.model_exists == 'false'
+        run: |
+          echo "📥 Downloading gemma3:1b model..."
+          echo "This may take several minutes depending on network speed..."
+          
+          # Start the pull request and capture the response
+          curl -X POST http://localhost:11434/api/pull \
+            -H "Content-Type: application/json" \
+            -d '{"name": "gemma3:1b"}' \
+            --silent --show-error | while read -r line; do
+              if [[ -n "$line" ]]; then
+                echo "Download progress: $line"
+              fi
+            done
+          
+          echo "✅ Model download completed!"
+          
+          # Verify the model was downloaded
+          echo "Verifying model installation..."
+          curl -s http://localhost:11434/api/tags
+      
+      - name: Test model with prompt
+        run: |
+          echo "🧪 Testing model with prompt..."
+          
+          response=$(curl -s -X POST http://localhost:11434/api/generate \
+            -H "Content-Type: application/json" \
+            -d '{
+              "model": "gemma3:1b",
+              "prompt": "hi, this is a test command, reply me with a short sentence.",
+              "stream": false
+            }')
+          
+          echo "Raw API response: $response"
+          echo ""
+          
+          # Extract the response text from JSON
+          if command -v jq >/dev/null 2>&1; then
+            model_response=$(echo "$response" | jq -r '.response // "No response found"')
+          else
+            model_response=$(echo "$response" | python3 -c "
+            import sys, json
+            try:
+                data = json.load(sys.stdin)
+                print(data.get('response', 'No response found'))
+            except:
+                print('Failed to parse JSON response')
+            ")
+          fi
+          
+          echo "════════════════════════════════"
+          echo "🤖 MODEL RESPONSE:"
+          echo "$model_response"
+          echo "════════════════════════════════"
+      
+      - name: List available models
+        run: |
+          echo "📋 Available models in Ollama:"
+          models_response=$(curl -s http://localhost:11434/api/tags)
+          
+          if command -v jq >/dev/null 2>&1; then
+            echo "$models_response" | jq -r '.models[]? | "- \(.name) (Size: \(.size // "unknown"))"'
+          else
+            echo "$models_response" | python3 -c "
+            import sys, json
+            try:
+                data = json.load(sys.stdin)
+                for model in data.get('models', []):
+                    name = model.get('name', 'Unknown')
+                    size = model.get('size', 'unknown')
+                    print(f'- {name} (Size: {size})')
+            except Exception as e:
+                print(f'Error parsing models: {e}')
+                print('Raw response:', '$models_response')
+            "
+          fi
+      
+      - name: Cleanup
+        if: always()
+        run: |
+          echo "🧹 Cleaning up Ollama service..."
+          docker stop ollama-service || true
+          docker rm ollama-service || true
