@@ -157,38 +157,38 @@ jobs:
         run: |
           echo "🔍 Analyzing PR with LLM..."
           
-          # Read the diff content and escape it for JSON
-          DIFF_CONTENT=$(cat pr_diff.txt | python3 -c "
-          import sys, json
-          content = sys.stdin.read()
-          print(json.dumps(content))
-          " | sed 's/^"\(.*\)"$/\1/')
-          
           # Create the prompt using a here-doc
           cat > prompt.txt << EOF
           Please analyze this git diff of a pull request and provide an executive summary in less than 30 words. Focus on the main changes and their purpose.
 
           Git diff:
-          ${DIFF_CONTENT}
+          $(cat pr_diff.txt)
 
           Executive summary (less than 30 words):
           EOF
           
-          # Escape the prompt for JSON
-          ESCAPED_PROMPT=$(cat prompt.txt | python3 -c "
-          import sys, json
-          content = sys.stdin.read()
-          print(json.dumps(content))
-          " | sed 's/^"\(.*\)"$/\1/')
+          # Create proper JSON payload using Python
+          python3 << 'PYTHON_EOF' > payload.json
+          import json
+          
+          with open('prompt.txt', 'r') as f:
+              prompt_content = f.read()
+          
+          payload = {
+              "model": "gemma3:1b",
+              "prompt": prompt_content,
+              "stream": False
+          }
+          
+          print(json.dumps(payload))
+          PYTHON_EOF
+          
+          echo "Sending request to LLM..."
           
           # Send to LLM
           response=$(curl -s -X POST http://localhost:11434/api/generate \
             -H "Content-Type: application/json" \
-            -d "{
-              \"model\": \"gemma3:1b\",
-              \"prompt\": $ESCAPED_PROMPT,
-              \"stream\": false
-            }")
+            -d @payload.json)
           
           echo "Raw LLM response: $response"
           echo ""
@@ -244,3 +244,4 @@ jobs:
           echo "🧹 Cleaning up temporary files..."
           rm -f pr_diff.txt || true
           rm -f prompt.txt || true
+          rm -f payload.json || true
