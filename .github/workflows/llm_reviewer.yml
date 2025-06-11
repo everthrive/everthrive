@@ -62,31 +62,31 @@ jobs:
           done'
           echo "Ollama service is ready!"
       
-      - name: Check if gemma3:1b model exists
+      - name: Check if codellama:7b model exists
         id: check-model
         run: |
-          echo "Checking if gemma3:1b model exists..."
+          echo "Checking if codellama:7b model exists..."
           models=$(curl -s http://localhost:11434/api/tags)
           echo "Available models response: $models"
           
-          if echo "$models" | grep -q "gemma3:1b"; then
+          if echo "$models" | grep -q "codellama:7b"; then
             echo "model_exists=true" >> $GITHUB_OUTPUT
-            echo "✅ Model gemma3:1b already exists"
+            echo "✅ Model codellama:7b already exists"
           else
             echo "model_exists=false" >> $GITHUB_OUTPUT
-            echo "❌ Model gemma3:1b not found, will download"
+            echo "❌ Model codellama:7b not found, will download"
           fi
       
-      - name: Download gemma3:1b model if not available
+      - name: Download codellama:7b model if not available
         if: steps.check-model.outputs.model_exists == 'false'
         run: |
-          echo "📥 Downloading gemma3:1b model..."
+          echo "📥 Downloading codellama:7b model..."
           echo "This may take several minutes depending on network speed..."
           
           # Start the pull request and capture the response
           curl -X POST http://localhost:11434/api/pull \
             -H "Content-Type: application/json" \
-            -d '{"name": "gemma3:1b"}' \
+            -d '{"name": "codellama:7b"}' \
             --silent --show-error | while read -r line; do
               if [[ -n "$line" ]]; then
                 echo "Download progress: $line"
@@ -122,7 +122,7 @@ jobs:
           echo "Diff stats:"
           git diff --stat $BASE_SHA..$HEAD_SHA
           
-          # Check if diff file is too large (limit to ~100000 chars based on gemma3:1b 32k token context)
+          # Check if diff file is too large (limit to ~100000 chars based on codellama:7b 32k token context)
           DIFF_SIZE=$(wc -c < pr_diff.txt)
           echo "Diff size: $DIFF_SIZE characters"
           
@@ -216,7 +216,7 @@ jobs:
               prompt_content = f.read()
           
           payload = {
-              "model": "gemma3:1b",
+              "model": "codellama:7b",
               "prompt": prompt_content,
               "stream": False
           }
