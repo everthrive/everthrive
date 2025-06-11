@@ -4,11 +4,21 @@ on:
   pull_request:
     types: [opened, synchronize, reopened]
   workflow_dispatch: # Allow manual triggering for testing
+    inputs:
+      action_rules:
+        description: 'Comma-separated list of specific checks for the LLM to perform'
+        required: false
+        default: 'Report for very clear error even without context in the diff'
+        type: string
 
 permissions:
   contents: read       # To checkout code and read repository contents
   pull-requests: write # To post comments on pull requests
   issues: write        # To post comments (PRs are issues in GitHub API)
+
+env:
+  # Default action rules - can be overridden by workflow input
+  DEFAULT_ACTION_RULES: 'Report if any of the change is rust code,Check if I am using json'
 
 jobs:
   llm-review:
@@ -128,14 +138,53 @@ jobs:
         run: |
           echo "🔍 Analyzing PR with LLM..."
           
-          # Create the prompt using a here-doc
+          # Determine which action rules to use
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ -n "${{ github.event.inputs.action_rules }}" ]; then
+            ACTION_RULES="${{ github.event.inputs.action_rules }}"
+            echo "Using workflow input action rules: $ACTION_RULES"
+          else
+            ACTION_RULES="$DEFAULT_ACTION_RULES"
+            echo "Using default action rules: $ACTION_RULES"
+          fi
+          
+          # Convert comma-separated rules to numbered list for prompt
+          echo "Processing action rules..."
+          python3 << 'PYTHON_EOF' > action_rules_formatted.txt
+          import os
+          
+          rules_string = os.environ.get('ACTION_RULES', '')
+          if rules_string:
+              rules = [rule.strip() for rule in rules_string.split(',') if rule.strip()]
+              formatted_rules = ""
+              for i, rule in enumerate(rules, 1):
+                  formatted_rules += f"{i}. {rule}\n"
+              print(formatted_rules.strip())
+          else:
+              print("No action rules provided")
+          PYTHON_EOF
+          
+          export ACTION_RULES="$ACTION_RULES"
+          
+          # Create the enhanced prompt using a here-doc
           cat > prompt.txt << EOF
-          Please analyze this git diff of a pull request and provide an executive summary in less than 30 words. Focus on the main changes and their purpose.
+          Please analyze this git diff of a pull request and provide a structured response.
 
           Git diff:
           $(cat pr_diff.txt)
 
-          Executive summary (less than 30 words):
+          Please provide your analysis in the following format:
+
+          **EXECUTIVE SUMMARY:** [Provide a concise summary in less than 30 words describing the main changes and their purpose]
+
+          **DETAILED ANALYSIS:**
+          $(cat action_rules_formatted.txt)
+
+          For each numbered item above, provide a specific response addressing that concern. Use the format:
+          1. [Your response to the first item]
+          2. [Your response to the second item]
+          (and so on for each item)
+
+          Keep responses concise but informative.
           EOF
           
           # Create proper JSON payload using Python
@@ -231,7 +280,7 @@ jobs:
           fi
           
           echo "════════════════════════════════════════════"
-          echo "📋 PULL REQUEST EXECUTIVE SUMMARY:"
+          echo "📋 PULL REQUEST ANALYSIS:"
           echo "$summary"
           echo ""
           echo "🔧 Model Used: $model_used"
@@ -267,12 +316,27 @@ jobs:
           # Extract summary and model info from saved response
           python3 << 'PYTHON_EOF' > comment_data.txt
           import json
+          import re
           
           with open('llm_response.json', 'r') as f:
               response_data = json.load(f)
           
-          summary = response_data.get('response', 'No response found')
+          full_response = response_data.get('response', 'No response found')
           model_used = response_data.get('model', 'unknown')
+          
+          # Parse the structured response
+          executive_summary = "No executive summary found"
+          detailed_analysis = "No detailed analysis found"
+          
+          # Extract executive summary
+          exec_match = re.search(r'\*\*EXECUTIVE SUMMARY:\*\*\s*(.+?)(?=\*\*DETAILED ANALYSIS:\*\*|$)', full_response, re.DOTALL | re.IGNORECASE)
+          if exec_match:
+              executive_summary = exec_match.group(1).strip()
+          
+          # Extract detailed analysis
+          detail_match = re.search(r'\*\*DETAILED ANALYSIS:\*\*\s*(.+?)$', full_response, re.DOTALL | re.IGNORECASE)
+          if detail_match:
+              detailed_analysis = detail_match.group(1).strip()
           
           # Get diff size
           try:
@@ -281,20 +345,26 @@ jobs:
           except:
               diff_size = 0
           
-          print(f"SUMMARY:{summary}")
+          print(f"EXECUTIVE_SUMMARY:{executive_summary}")
+          print(f"DETAILED_ANALYSIS:{detailed_analysis}")
           print(f"MODEL:{model_used}")
           print(f"DIFF_SIZE:{diff_size}")
+          print(f"FULL_RESPONSE:{full_response}")
           PYTHON_EOF
           
           # Read the extracted data
-          SUMMARY=$(grep "^SUMMARY:" comment_data.txt | cut -d: -f2-)
+          EXECUTIVE_SUMMARY=$(grep "^EXECUTIVE_SUMMARY:" comment_data.txt | cut -d: -f2-)
+          DETAILED_ANALYSIS=$(grep "^DETAILED_ANALYSIS:" comment_data.txt | cut -d: -f2-)
           MODEL=$(grep "^MODEL:" comment_data.txt | cut -d: -f2-)
           DIFF_SIZE=$(grep "^DIFF_SIZE:" comment_data.txt | cut -d: -f2-)
+          FULL_RESPONSE=$(grep "^FULL_RESPONSE:" comment_data.txt | cut -d: -f2-)
           
           # Export variables for Python script
-          export SUMMARY="$SUMMARY"
+          export EXECUTIVE_SUMMARY="$EXECUTIVE_SUMMARY"
+          export DETAILED_ANALYSIS="$DETAILED_ANALYSIS"
           export MODEL="$MODEL" 
           export DIFF_SIZE="$DIFF_SIZE"
+          export FULL_RESPONSE="$FULL_RESPONSE"
           
           # Create the comment body with proper JSON escaping
           python3 << 'PYTHON_EOF' > comment_body.json
@@ -302,19 +372,30 @@ jobs:
           import os
           from datetime import datetime
           
-          summary = os.environ.get('SUMMARY', 'No summary available')
+          executive_summary = os.environ.get('EXECUTIVE_SUMMARY', 'No executive summary available')
+          detailed_analysis = os.environ.get('DETAILED_ANALYSIS', 'No detailed analysis available')
           model = os.environ.get('MODEL', 'unknown')
           diff_size = os.environ.get('DIFF_SIZE', '0')
+          full_response = os.environ.get('FULL_RESPONSE', '')
           timestamp = datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')
           
-          comment_body = "## 🤖 AI Code Review Summary\n\n"
-          comment_body += f"**Executive Summary:** {summary}\n\n"
+          comment_body = "## 🤖 AI Code Review\n\n"
+          comment_body += "### Executive Summary\n"
+          comment_body += f"{executive_summary}\n\n"
+          comment_body += "### Details\n"
+          comment_body += f"{detailed_analysis}\n\n"
           comment_body += "---\n\n"
-          comment_body += "**Analysis Details:**\n"
+          comment_body += "**Analysis Metadata:**\n"
           comment_body += f"- Model: `{model}`\n"
           comment_body += f"- Generated: {timestamp}\n"
           comment_body += f"- Diff size: {diff_size} characters\n\n"
-          comment_body += "> This summary was automatically generated by an AI model. Please review the changes manually for accuracy and completeness."
+          comment_body += "<details>\n"
+          comment_body += "<summary>📋 Full LLM Response</summary>\n\n"
+          comment_body += "```\n"
+          comment_body += f"{full_response}\n"
+          comment_body += "```\n\n"
+          comment_body += "</details>\n\n"
+          comment_body += "> This analysis was automatically generated by an AI model. Please review the changes manually for accuracy and completeness."
           
           comment_json = {"body": comment_body}
           
@@ -363,3 +444,4 @@ jobs:
           rm -f comment_body.json || true
           rm -f comment_data.txt || true
           rm -f llm_response.json || true
+          rm -f action_rules_formatted.txt || true
