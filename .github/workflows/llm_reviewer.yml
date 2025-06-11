@@ -180,32 +180,38 @@ jobs:
           
           # Create the enhanced prompt with clear structure
           cat > prompt.txt << EOF
-          You are a senior software engineer reviewing a pull request. You must analyze ONLY the concrete changes shown in this git diff.
-
-          Git diff to review:
-          $(cat pr_diff.txt)
+          You are a senior software engineer reviewing a pull request. You must analyze ONLY the concrete changes shown between the boundaries below.
 
           Review Guidelines:
           $(cat analysis_rules.txt)
 
+          =========================================
+          GIT DIFF CONTENT TO REVIEW:
+          =========================================
+          $(cat pr_diff.txt)
+          =========================================
+          END OF GIT DIFF CONTENT
+          =========================================
+
           STRICT REQUIREMENTS: 
-          - You may ONLY comment on lines that actually appear in the git diff above
-          - Every point you make MUST reference a specific filename and line number from the diff
-          - Do NOT create, write, or show any code that is not already in the diff
+          - You may ONLY comment on lines that appear between the ========= boundaries above
+          - Every point you make MUST reference a specific filename and line number from the diff content
+          - Do NOT create, write, or show any code that is not already between the boundaries
           - Do NOT make up examples or hypothetical scenarios
-          - If you see no actual problems in the concrete changes shown, state "No critical issues identified in these changes"
+          - It is perfectly acceptable to have no comments if the changes look good
+          - If you see no actual problems in the concrete changes shown between the boundaries, state "No critical issues identified in these changes"
           - Use this format for any issue: "In [filename] line [number]: [brief description]"
           - Do NOT write function definitions, code blocks, or programming examples
-          - Only discuss what you can actually see being added (+) or removed (-) in the diff
+          - Only discuss what you can actually see being added (+) or removed (-) between the ========= boundaries
 
-          If you cannot find concrete issues in the actual diff lines, do not invent problems.
+          If you cannot find concrete issues in the actual diff lines between the boundaries, do not invent problems. Having no comments is completely fine.
 
           Format:
           1. One sentence describing what files were changed in this pull request
-          2. Critical issues (only if you see them in actual diff lines): "In [filename] line [number]: [issue]"
-          3. Critical recommendations (only if based on actual diff content): "In [filename] line [number]: [recommendation]"
+          2. Critical issues (only if you see them in actual diff lines between boundaries): "In [filename] line [number]: [issue]"
+          3. Critical recommendations (only if based on actual diff content between boundaries): "In [filename] line [number]: [recommendation]"
 
-          Remember: Only comment on code that actually exists in the git diff shown above.
+          Remember: Only comment on code that actually exists between the ========= boundaries above. No comments is a valid and good outcome.
           EOF
           
           # Debug: Print the full prompt being sent to LLM
