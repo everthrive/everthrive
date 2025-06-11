@@ -180,7 +180,7 @@ jobs:
           
           # Create the enhanced prompt with clear structure
           cat > prompt.txt << EOF
-          You are a senior software engineer reviewing a pull request. The git diff below shows the ACTUAL changes that were made in this pull request. Your job is to review ONLY these changes.
+          You are a senior software engineer reviewing a pull request. You must analyze ONLY the concrete changes shown in this git diff.
 
           Git diff to review:
           $(cat pr_diff.txt)
@@ -188,23 +188,24 @@ jobs:
           Review Guidelines:
           $(cat analysis_rules.txt)
 
-          CRITICAL INSTRUCTIONS: 
-          - Analyze ONLY the git diff shown above - these are the real changes in the pull request
-          - Do NOT create, generate, or invent any code examples
-          - Do NOT write your own code snippets to demonstrate points
-          - Do NOT create functions or code blocks in your response
-          - Review the actual file changes, additions, and deletions shown in the diff
-          - Start your review immediately with analysis of the provided changes
-          - No conversational openings or closings
-          - Each point should be 1-2 sentences maximum
-          - Focus only on critical issues that affect code correctness
+          STRICT REQUIREMENTS: 
+          - You may ONLY comment on lines that actually appear in the git diff above
+          - Every point you make MUST reference a specific filename and line number from the diff
+          - Do NOT create, write, or show any code that is not already in the diff
+          - Do NOT make up examples or hypothetical scenarios
+          - If you see no actual problems in the concrete changes shown, state "No critical issues identified in these changes"
+          - Use this format for any issue: "In [filename] line [number]: [brief description]"
+          - Do NOT write function definitions, code blocks, or programming examples
+          - Only discuss what you can actually see being added (+) or removed (-) in the diff
 
-          Format your review as:
-          1. Brief summary of what changed in the pull request (1 sentence)
-          2. Critical issues found in the changes (if any) - bullet points
-          3. Critical recommendations for the changes (if any) - bullet points
+          If you cannot find concrete issues in the actual diff lines, do not invent problems.
 
-          If the changes have no critical issues, state "No critical issues identified in these changes" and stop.
+          Format:
+          1. One sentence describing what files were changed in this pull request
+          2. Critical issues (only if you see them in actual diff lines): "In [filename] line [number]: [issue]"
+          3. Critical recommendations (only if based on actual diff content): "In [filename] line [number]: [recommendation]"
+
+          Remember: Only comment on code that actually exists in the git diff shown above.
           EOF
           
           # Create proper JSON payload using Python
