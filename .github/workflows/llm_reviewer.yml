@@ -180,30 +180,31 @@ jobs:
           
           # Create the enhanced prompt with clear structure
           cat > prompt.txt << EOF
-          You are a senior software engineer conducting a code review. Your colleague has submitted this pull request and needs direct, actionable feedback.
+          You are a senior software engineer reviewing a pull request. The git diff below shows the ACTUAL changes that were made in this pull request. Your job is to review ONLY these changes.
 
-          Git diff:
+          Git diff to review:
           $(cat pr_diff.txt)
 
           Review Guidelines:
           $(cat analysis_rules.txt)
 
-          IMPORTANT: 
-          - Start your review immediately with technical content
-          - Do not include conversational openings like "Here's my review..." or "Okay..."
-          - Do not include conversational closings like "Let me know..." or "Happy to discuss..."
-          - Do not include any code snippets in your response
-          - Reference issues by filename/function when relevant
+          CRITICAL INSTRUCTIONS: 
+          - Analyze ONLY the git diff shown above - these are the real changes in the pull request
+          - Do NOT create, generate, or invent any code examples
+          - Do NOT write your own code snippets to demonstrate points
+          - Do NOT create functions or code blocks in your response
+          - Review the actual file changes, additions, and deletions shown in the diff
+          - Start your review immediately with analysis of the provided changes
+          - No conversational openings or closings
           - Each point should be 1-2 sentences maximum
           - Focus only on critical issues that affect code correctness
-          - Do not provide overall assessment sections
 
-          Write your review in this format:
-          1. Brief summary of changes (1 sentence)
-          2. Critical issues (if any) - bullet points, 1-2 sentences each
-          3. Critical recommendations (if any) - bullet points, 1-2 sentences each
+          Format your review as:
+          1. Brief summary of what changed in the pull request (1 sentence)
+          2. Critical issues found in the changes (if any) - bullet points
+          3. Critical recommendations for the changes (if any) - bullet points
 
-          If no critical issues exist, simply state "No critical issues identified" and stop.
+          If the changes have no critical issues, state "No critical issues identified in these changes" and stop.
           EOF
           
           # Create proper JSON payload using Python
