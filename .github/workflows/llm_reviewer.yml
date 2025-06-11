@@ -18,7 +18,7 @@ permissions:
 
 env:
   # Default action rules - applied to all repositories
-  DEFAULT_ACTION_RULES: 'Do not include code snippets in your response. Instead reference code by filename/function name/line number. Keep each point concise around 20 words maximum.'
+  DEFAULT_ACTION_RULES: 'Keep each point to 1-2 sentences maximum. Do not provide overall assessment. Only list recommendations for critically bad items that affect code correctness. Do not offer to elaborate or continue the conversation.'
   # User action rules - specific to this repository
   USER_ACTION_RULES: 'Only report for errors that immediately make the code illogical / erroneous'
 
@@ -180,22 +180,30 @@ jobs:
           
           # Create the enhanced prompt with clear structure
           cat > prompt.txt << EOF
-          You are a helpful code reviewer. Look at this git diff and write a brief, natural review.
+          You are a senior software engineer conducting a code review. Your colleague has submitted this pull request and needs direct, actionable feedback.
 
           Git diff:
           $(cat pr_diff.txt)
 
-          IMPORTANT: Write your response in plain English paragraphs, like a human would. 
-          Do not use JSON, bullet points, or structured formats.
-          Do not include any code snippets in your response.
-          When mentioning code issues, just reference the file name and describe the problem in words.
+          Review Guidelines:
+          $(cat analysis_rules.txt)
 
-          Please write:
-          1. A brief summary of what changed (1-2 sentences)
-          2. Any issues you notice (if any) described in natural language
-          3. Overall assessment
+          IMPORTANT: 
+          - Start your review immediately with technical content
+          - Do not include conversational openings like "Here's my review..." or "Okay..."
+          - Do not include conversational closings like "Let me know..." or "Happy to discuss..."
+          - Do not include any code snippets in your response
+          - Reference issues by filename/function when relevant
+          - Each point should be 1-2 sentences maximum
+          - Focus only on critical issues that affect code correctness
+          - Do not provide overall assessment sections
 
-          Keep it conversational and helpful, like you're talking to a colleague.
+          Write your review in this format:
+          1. Brief summary of changes (1 sentence)
+          2. Critical issues (if any) - bullet points, 1-2 sentences each
+          3. Critical recommendations (if any) - bullet points, 1-2 sentences each
+
+          If no critical issues exist, simply state "No critical issues identified" and stop.
           EOF
           
           # Create proper JSON payload using Python
