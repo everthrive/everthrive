@@ -180,32 +180,22 @@ jobs:
           
           # Create the enhanced prompt with clear structure
           cat > prompt.txt << EOF
-          You are an AI code reviewer. Analyze this git diff and provide feedback.
+          You are a helpful code reviewer. Look at this git diff and write a brief, natural review.
 
           Git diff:
           $(cat pr_diff.txt)
 
-          CRITICAL RULES:
-          $(cat analysis_rules.txt)
+          IMPORTANT: Write your response in plain English paragraphs, like a human would. 
+          Do not use JSON, bullet points, or structured formats.
+          Do not include any code snippets in your response.
+          When mentioning code issues, just reference the file name and describe the problem in words.
 
-          ABSOLUTELY NO CODE SNIPPETS OR PROGRAMMING EXAMPLES IN YOUR RESPONSE. 
-          Do not include any lines that look like code, functions, variables, or programming syntax.
-          Only write in natural English sentences.
+          Please write:
+          1. A brief summary of what changed (1-2 sentences)
+          2. Any issues you notice (if any) described in natural language
+          3. Overall assessment
 
-          Provide a natural analysis with:
-
-          **Executive Summary:** A brief summary (under 30 words) of the main changes.
-
-          **Review Comments:**
-          Write your feedback in plain English sentences. For each issue:
-          - Describe the problem in natural language
-          - Reference location as "filename/function/line" 
-          - Explain the impact briefly
-          - Use bullet points with natural sentences only
-
-          If no critical issues found, state "No significant issues found" and briefly mention what looks good.
-
-          Remember: Write like a human reviewer, not like a programming tutorial. No code examples whatsoever.
+          Keep it conversational and helpful, like you're talking to a colleague.
           EOF
           
           # Create proper JSON payload using Python
@@ -353,6 +343,7 @@ jobs:
               with open('llm_response.json', 'r') as f:
                   response_data = json.load(f)
               
+              # Simple parsing - just use the response naturally
               full_response = response_data.get('response', 'No response found')
               model_used = response_data.get('model', 'unknown')
               
@@ -366,81 +357,23 @@ jobs:
               except:
                   diff_size = 0
               
-              # Simple parsing - just try to extract executive summary
-              executive_summary = ""
-              review_content = full_response
+              # Minimal cleaning - just remove obvious JSON artifacts if present
+              clean_response = full_response
+              if clean_response.startswith('{') and clean_response.endswith('}'):
+                  # If it looks like JSON, try to extract readable content
+                  clean_response = re.sub(r'[{}"\[\],:]', ' ', clean_response)
+                  clean_response = re.sub(r'\s+', ' ', clean_response).strip()
               
-              # Look for executive summary (flexible patterns)
-              summary_patterns = [
-                  r'\*\*Executive Summary:\*\*\s*(.+?)(?=\*\*Review Comments:\*\*|\*\*Review\*\*|\n\n|$)',
-                  r'Executive Summary:\s*(.+?)(?=Review Comments:|Review:|Details:|$)',
-                  r'\*\*EXECUTIVE SUMMARY:\*\*\s*(.+?)(?=\*\*|$)'
-              ]
+              # Basic cleanup of escaped characters
+              clean_response = clean_response.replace('\\n', '\n').replace('\\"', '"')
               
-              for pattern in summary_patterns:
-                  match = re.search(pattern, full_response, re.DOTALL | re.IGNORECASE)
-                  if match:
-                      executive_summary = match.group(1).strip()
-                      # Remove the summary from review content
-                      review_content = re.sub(pattern, '', full_response, flags=re.DOTALL | re.IGNORECASE).strip()
-                      break
-              
-              # Clean up review content - remove any remaining headers
-              review_content = re.sub(r'\*\*Review Comments:\*\*\s*', '', review_content, flags=re.IGNORECASE)
-              review_content = re.sub(r'\*\*DETAILED ANALYSIS:\*\*\s*', '', review_content, flags=re.IGNORECASE)
-              
-              # Clean up formatting artifacts and escaped characters
-              review_content = re.sub(r'\\n\\n', '\n\n', review_content)  # Fix escaped newlines
-              review_content = re.sub(r'\\n', '\n', review_content)       # Fix single escaped newlines
-              review_content = re.sub(r'\\"', '"', review_content)        # Fix escaped quotes
-              review_content = re.sub(r'\\', '', review_content)          # Remove remaining backslashes
-              
-              # Remove code-like patterns (lines that look like programming code)
-              lines = review_content.split('\n')
-              cleaned_lines = []
-              for line in lines:
-                  line = line.strip()
-                  # Skip lines that look like code
-                  if (line.startswith('if ') or line.startswith('def ') or 
-                      line.startswith('return ') or line.startswith('import ') or
-                      line.startswith('from ') or '=' in line and '+=' in line or
-                      line.startswith('summary +=') or '"""' in line or
-                      line.startswith('code.') or line.startswith('function') and '(' in line):
-                      continue
-                  # Skip lines that are mostly special characters
-                  if len(line) > 0 and len([c for c in line if c in '(){}[];,="\'']) / len(line) > 0.3:
-                      continue
-                  cleaned_lines.append(line)
-              
-              review_content = '\n'.join(cleaned_lines).strip()
-              
-              # If no executive summary found, use first sentence of response
-              if not executive_summary:
-                  sentences = review_content.split('.')
-                  if sentences and len(sentences[0].strip()) > 0:
-                      executive_summary = sentences[0].strip() + '.'
-                      review_content = '. '.join(sentences[1:]).strip()
-              
-              # Final cleanup - remove extra whitespace and empty lines
-              review_content = re.sub(r'\n\s*\n\s*\n', '\n\n', review_content)  # Max 2 consecutive newlines
-              review_content = review_content.strip()
-              
-              # Fallback to full response if parsing fails
-              if not review_content.strip():
-                  review_content = "Review analysis completed. Please check the workflow logs for detailed output."
-              
-              print(f"📝 Extracted executive summary: {len(executive_summary)} chars")
-              print(f"📋 Review content: {len(review_content)} chars")
+              print(f"📋 Using response: {len(clean_response)} chars")
               
               # Create simple, natural comment body
               timestamp = datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')
               
               comment_body = "## 🤖 AI Code Review\n\n"
-              
-              if executive_summary:
-                  comment_body += f"**{executive_summary}**\n\n"
-              
-              comment_body += f"{review_content}\n\n"
+              comment_body += f"{clean_response}\n\n"
               comment_body += "---\n\n"
               comment_body += f"*Generated by {model_used} at {timestamp} • Analyzed {diff_size} characters*\n\n"
               comment_body += "> This analysis was automatically generated. Please review changes manually for accuracy and completeness."
