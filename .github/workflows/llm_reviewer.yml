@@ -180,30 +180,28 @@ jobs:
           
           # Create the enhanced prompt with clear structure
           cat > prompt.txt << EOF
-          You are an AI code reviewer. Analyze this git diff and provide a structured response.
+          You are an AI code reviewer. Analyze this git diff and provide feedback.
 
           Git diff:
           $(cat pr_diff.txt)
 
-          IMPORTANT INSTRUCTIONS:
+          IMPORTANT GUIDELINES:
           $(cat analysis_rules.txt)
 
-          Please provide your analysis in the following format:
+          Please provide a natural analysis with:
 
-          **EXECUTIVE SUMMARY:** [Provide a concise summary in less than 30 words describing the main changes and their purpose]
+          **Executive Summary:** A brief summary (under 30 words) of the main changes.
 
-          **DETAILED ANALYSIS:**
-          [For each issue or observation, follow this format:]
-          - **Issue/Observation:** [Brief description - max 20 words]
-          - **Location:** [filename/function/line_number format]
-          - **Impact:** [Brief impact assessment - max 15 words]
+          **Review Comments:**
+          Write your feedback in a natural, conversational style. For each issue you identify:
+          - Describe the problem clearly and concisely  
+          - Reference code by filename/function/line number (never include code snippets)
+          - Explain the potential impact briefly
+          - Keep each point under 25 words when possible
 
-          REMEMBER:
-          - NO code snippets in your response
-          - Reference code by location only (filename/function/line_number)
-          - Keep each point concise
-          - Focus on actual errors that make code illogical or erroneous
-          - If no significant issues found, state "No critical issues identified"
+          If you find no critical issues, simply state "No significant issues found" and provide a brief positive comment about the changes.
+
+          Remember: Focus only on errors that make code illogical or erroneous. Avoid nitpicking style issues.
           EOF
           
           # Create proper JSON payload using Python
@@ -364,74 +362,55 @@ jobs:
               except:
                   diff_size = 0
               
-              # Try to parse structured response, but fallback gracefully
+              # Simple parsing - just try to extract executive summary
               executive_summary = ""
-              detailed_analysis = ""
+              review_content = full_response
               
-              # Look for executive summary
-              exec_patterns = [
-                  r'\*\*EXECUTIVE SUMMARY:\*\*\s*(.+?)(?=\*\*DETAILED ANALYSIS:\*\*|$)',
-                  r'EXECUTIVE SUMMARY:\s*(.+?)(?=DETAILED ANALYSIS:|$)',
-                  r'Executive Summary:\s*(.+?)(?=Details:|Detailed Analysis:|$)'
+              # Look for executive summary (flexible patterns)
+              summary_patterns = [
+                  r'\*\*Executive Summary:\*\*\s*(.+?)(?=\*\*Review Comments:\*\*|\*\*Review\*\*|\n\n|$)',
+                  r'Executive Summary:\s*(.+?)(?=Review Comments:|Review:|Details:|$)',
+                  r'\*\*EXECUTIVE SUMMARY:\*\*\s*(.+?)(?=\*\*|$)'
               ]
               
-              for pattern in exec_patterns:
+              for pattern in summary_patterns:
                   match = re.search(pattern, full_response, re.DOTALL | re.IGNORECASE)
                   if match:
                       executive_summary = match.group(1).strip()
+                      # Remove the summary from review content
+                      review_content = re.sub(pattern, '', full_response, flags=re.DOTALL | re.IGNORECASE).strip()
                       break
               
-              # Look for detailed analysis
-              detail_patterns = [
-                  r'\*\*DETAILED ANALYSIS:\*\*\s*(.+?)$',
-                  r'DETAILED ANALYSIS:\s*(.+?)$',
-                  r'Details:\s*(.+?)$',
-                  r'Detailed Analysis:\s*(.+?)$'
-              ]
+              # Clean up review content - remove any remaining headers
+              review_content = re.sub(r'\*\*Review Comments:\*\*\s*', '', review_content, flags=re.IGNORECASE)
+              review_content = re.sub(r'\*\*DETAILED ANALYSIS:\*\*\s*', '', review_content, flags=re.IGNORECASE)
               
-              for pattern in detail_patterns:
-                  match = re.search(pattern, full_response, re.DOTALL | re.IGNORECASE)
-                  if match:
-                      detailed_analysis = match.group(1).strip()
-                      break
+              # If no executive summary found, use first sentence of response
+              if not executive_summary:
+                  sentences = full_response.split('.')
+                  if sentences:
+                      executive_summary = sentences[0].strip() + '.'
+                      review_content = '. '.join(sentences[1:]).strip()
               
-              # If structured parsing failed, use the whole response as summary
-              if not executive_summary and not detailed_analysis:
-                  print("⚠️ Structured parsing failed, using full response")
-                  if len(full_response) > 200:
-                      executive_summary = full_response[:200] + "..."
-                      detailed_analysis = full_response
-                  else:
-                      executive_summary = full_response
-                      detailed_analysis = "See full response above."
-              elif not executive_summary:
-                  executive_summary = "Analysis provided in details section"
-              elif not detailed_analysis:
-                  detailed_analysis = "No specific detailed analysis found"
+              # Fallback to full response if parsing fails
+              if not review_content.strip():
+                  review_content = full_response
               
               print(f"📝 Extracted executive summary: {len(executive_summary)} chars")
-              print(f"📋 Extracted detailed analysis: {len(detailed_analysis)} chars")
+              print(f"📋 Review content: {len(review_content)} chars")
               
-              # Create comment body
+              # Create simple, natural comment body
               timestamp = datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')
               
               comment_body = "## 🤖 AI Code Review\n\n"
-              comment_body += "### Executive Summary\n"
-              comment_body += f"{executive_summary}\n\n"
-              comment_body += "### Details\n"
-              comment_body += f"{detailed_analysis}\n\n"
+              
+              if executive_summary:
+                  comment_body += f"**{executive_summary}**\n\n"
+              
+              comment_body += f"{review_content}\n\n"
               comment_body += "---\n\n"
-              comment_body += "**Analysis Metadata:**\n"
-              comment_body += f"- Model: `{model_used}`\n"
-              comment_body += f"- Generated: {timestamp}\n"
-              comment_body += f"- Diff size: {diff_size} characters\n\n"
-              comment_body += "<details>\n"
-              comment_body += "<summary>📋 Full LLM Response</summary>\n\n"
-              comment_body += "```\n"
-              comment_body += f"{full_response}\n"
-              comment_body += "```\n\n"
-              comment_body += "</details>\n\n"
-              comment_body += "> This analysis was automatically generated by an AI model. Please review the changes manually for accuracy and completeness."
+              comment_body += f"*Generated by {model_used} at {timestamp} • Analyzed {diff_size} characters*\n\n"
+              comment_body += "> This analysis was automatically generated. Please review changes manually for accuracy and completeness."
               
               # Create JSON payload for GitHub API
               comment_json = {"body": comment_body}
