@@ -1,0 +1,495 @@
+name: LLM PR Reviewer
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+  workflow_dispatch: # Allow manual triggering for testing
+    inputs:
+      action_rules:
+        description: 'Comma-separated list of specific checks for the LLM to perform'
+        required: false
+        default: 'Do not include code snippets in your response. Instead reference code by filename/function name/line number. Keep each point concise around 20 words maximum.'
+        type: string
+
+permissions:
+  contents: read       # To checkout code and read repository contents
+  pull-requests: write # To post comments on pull requests
+  issues: write        # To post comments (PRs are issues in GitHub API)
+
+env:
+  # Default action rules - applied to all repositories
+  DEFAULT_ACTION_RULES: 'Keep each point to 1-2 sentences maximum. Do not provide overall assessment. Only list recommendations for critically bad items that affect code correctness. Do not offer to elaborate or continue the conversation.'
+  # User action rules - specific to this repository
+  USER_ACTION_RULES: 'Only report for errors that immediately make the code illogical / erroneous'
+
+jobs:
+  llm-review:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      # COMMENTED OUT: Cache functionality due to permission issues
+      # TODO: Fix permission issues for future caching implementation
+      # - name: Setup cache for Ollama models
+      #   uses: actions/cache@v4
+      #   with:
+      #     path: ~/.ollama
+      #     key: ollama-models-${{ runner.os }}-gemma3-1b-v1
+      #     restore-keys: |
+      #       ollama-models-${{ runner.os }}-
+      
+      - name: Start Ollama service
+        run: |
+          echo "Starting Ollama service..."
+          # COMMENTED OUT: Volume mount for caching due to permission issues
+          # docker run -d \
+          #   --name ollama-service \
+          #   -p 11434:11434 \
+          #   -v ~/.ollama:/root/.ollama \
+          #   ollama/ollama:latest
+          
+          docker run -d \
+            --name ollama-service \
+            -p 11434:11434 \
+            ollama/ollama:latest
+          
+          echo "Waiting for Ollama service to be ready..."
+          timeout 120s bash -c 'until curl -s http://localhost:11434/api/tags >/dev/null 2>&1; do 
+            echo "Waiting for Ollama to start..."
+            sleep 3
+          done'
+          echo "Ollama service is ready!"
+      
+      - name: Check if gemma3:1b model exists
+        id: check-model
+        run: |
+          echo "Checking if gemma3:1b model exists..."
+          models=$(curl -s http://localhost:11434/api/tags)
+          echo "Available models response: $models"
+          
+          if echo "$models" | grep -q "gemma3:1b"; then
+            echo "model_exists=true" >> $GITHUB_OUTPUT
+            echo "✅ Model gemma3:1b already exists"
+          else
+            echo "model_exists=false" >> $GITHUB_OUTPUT
+            echo "❌ Model gemma3:1b not found, will download"
+          fi
+      
+      - name: Download gemma3:1b model if not available
+        if: steps.check-model.outputs.model_exists == 'false'
+        run: |
+          echo "📥 Downloading gemma3:1b model..."
+          echo "This may take several minutes depending on network speed..."
+          
+          # Start the pull request and capture the response
+          curl -X POST http://localhost:11434/api/pull \
+            -H "Content-Type: application/json" \
+            -d '{"name": "gemma3:1b"}' \
+            --silent --show-error | while read -r line; do
+              if [[ -n "$line" ]]; then
+                echo "Download progress: $line"
+              fi
+            done
+          
+          echo "✅ Model download completed!"
+          
+          # Verify the model was downloaded
+          echo "Verifying model installation..."
+          curl -s http://localhost:11434/api/tags
+      
+      - name: Get PR diff
+        id: get-diff
+        run: |
+          echo "📄 Getting PR diff..."
+          
+          # Get the base and head commit SHAs
+          BASE_SHA="${{ github.event.pull_request.base.sha }}"
+          HEAD_SHA="${{ github.event.pull_request.head.sha }}"
+          
+          echo "Base SHA: $BASE_SHA"
+          echo "Head SHA: $HEAD_SHA"
+          
+          # Get the diff
+          git fetch origin $BASE_SHA
+          git fetch origin $HEAD_SHA
+          
+          # Generate diff and save to file for processing
+          git diff $BASE_SHA..$HEAD_SHA > pr_diff.txt
+          
+          # Show diff stats
+          echo "Diff stats:"
+          git diff --stat $BASE_SHA..$HEAD_SHA
+          
+          # Check if diff file is too large (limit to ~100000 chars based on gemma3:1b 32k token context)
+          DIFF_SIZE=$(wc -c < pr_diff.txt)
+          echo "Diff size: $DIFF_SIZE characters"
+          
+          if [ $DIFF_SIZE -gt 100000 ]; then
+            echo "⚠️ Diff is large ($DIFF_SIZE chars), truncating to first 100000 characters..."
+            head -c 100000 pr_diff.txt > pr_diff_truncated.txt
+            mv pr_diff_truncated.txt pr_diff.txt
+            echo "...diff truncated due to size" >> pr_diff.txt
+          fi
+          
+          echo "diff_ready=true" >> $GITHUB_OUTPUT
+      
+      - name: Analyze PR with LLM
+        if: steps.get-diff.outputs.diff_ready == 'true'
+        run: |
+          echo "🔍 Analyzing PR with LLM..."
+          
+          # Determine which action rules to use (workflow input overrides default)
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ -n "${{ github.event.inputs.action_rules }}" ]; then
+            CUSTOM_RULES="${{ github.event.inputs.action_rules }}"
+            echo "Using workflow input custom rules: $CUSTOM_RULES"
+          else
+            CUSTOM_RULES=""
+            echo "No custom rules provided via workflow input"
+          fi
+          
+          # Prepare all rules for the prompt
+          echo "Preparing analysis rules..."
+          python3 << 'PYTHON_EOF' > analysis_rules.txt
+          import os
+          
+          # Always include default action rules
+          default_rules = os.environ.get('DEFAULT_ACTION_RULES', '')
+          user_rules = os.environ.get('USER_ACTION_RULES', '')
+          custom_rules = os.environ.get('CUSTOM_RULES', '')
+          
+          all_rules = []
+          
+          if default_rules:
+              all_rules.append(f"**FORMATTING GUIDELINES:** {default_rules}")
+          
+          if user_rules:
+              all_rules.append(f"**ANALYSIS CRITERIA:** {user_rules}")
+          
+          if custom_rules:
+              custom_list = [rule.strip() for rule in custom_rules.split(',') if rule.strip()]
+              for i, rule in enumerate(custom_list, 1):
+                  all_rules.append(f"**ADDITIONAL CHECK {i}:** {rule}")
+          
+          for i, rule in enumerate(all_rules, 1):
+              print(f"{i}. {rule}")
+          PYTHON_EOF
+          
+          export CUSTOM_RULES="$CUSTOM_RULES"
+          
+          # Create the enhanced prompt with clear structure
+          cat > prompt.txt << EOF
+          You are a senior software engineer reviewing a pull request. You must analyze ONLY the concrete changes shown between the boundaries below.
+
+          Review Guidelines:
+          $(cat analysis_rules.txt)
+
+          =========================================
+          GIT DIFF CONTENT TO REVIEW:
+          =========================================
+          $(cat pr_diff.txt)
+          =========================================
+          END OF GIT DIFF CONTENT
+          =========================================
+
+          STRICT REQUIREMENTS: 
+          - You may ONLY comment on lines that appear between the ========= boundaries above
+          - Every point you make MUST reference a specific filename and line number from the diff content
+          - Do NOT create, write, or show any code that is not already between the boundaries
+          - Do NOT make up examples or hypothetical scenarios
+          - It is perfectly acceptable to have no comments if the changes look good
+          - If you see no actual problems in the concrete changes shown between the boundaries, state "No critical issues identified in these changes"
+          - Use this format for any issue: "In [filename] line [number]: [brief description]"
+          - Do NOT write function definitions, code blocks, or programming examples
+          - Only discuss what you can actually see being added (+) or removed (-) between the ========= boundaries
+
+          If you cannot find concrete issues in the actual diff lines between the boundaries, do not invent problems. Having no comments is completely fine.
+
+          Format:
+          1. One sentence describing what files were changed in this pull request
+          2. Critical issues (only if you see them in actual diff lines between boundaries): "In [filename] line [number]: [issue]"
+          3. Critical recommendations (only if based on actual diff content between boundaries): "In [filename] line [number]: [recommendation]"
+
+          Remember: Only comment on code that actually exists between the ========= boundaries above. No comments is a valid and good outcome.
+          EOF
+          
+          # Debug: Print the full prompt being sent to LLM
+          echo "🐛 DEBUG: Full prompt being sent to LLM:"
+          echo "=========================================="
+          cat prompt.txt
+          echo "=========================================="
+          echo "Prompt length: $(wc -c < prompt.txt) characters"
+          echo ""
+          
+          # Create proper JSON payload using Python
+          python3 << 'PYTHON_EOF' > payload.json
+          import json
+          
+          with open('prompt.txt', 'r') as f:
+              prompt_content = f.read()
+          
+          payload = {
+              "model": "gemma3:1b",
+              "prompt": prompt_content,
+              "stream": False
+          }
+          
+          print(json.dumps(payload))
+          PYTHON_EOF
+          
+          echo "Sending request to LLM..."
+          
+          # Send to LLM with timeout protection
+          response=$(curl -s -X POST \
+            --max-time 300 \
+            --connect-timeout 30 \
+            -H "Content-Type: application/json" \
+            -d @payload.json \
+            http://localhost:11434/api/generate)
+          
+          # Check if curl succeeded
+          if [ $? -ne 0 ]; then
+            echo "❌ LLM request failed or timed out"
+            echo '{"response": "LLM request timed out after 5 minutes. Please try again.", "model": "timeout"}' > llm_response.json
+          else
+            echo "Raw LLM response: $response"
+            echo ""
+            
+            # Save response for use in comment step
+            echo "$response" > llm_response.json
+          fi
+          
+          # Extract and display detailed response information
+          if command -v jq >/dev/null 2>&1; then
+            summary=$(echo "$response" | jq -r '.response // "No response found"')
+            model_used=$(echo "$response" | jq -r '.model // "unknown"')
+            created_at=$(echo "$response" | jq -r '.created_at // "unknown"')
+            done_status=$(echo "$response" | jq -r '.done // false')
+            total_duration=$(echo "$response" | jq -r '.total_duration // "unknown"')
+            context=$(echo "$response" | jq -r '.context // []')
+          else
+            summary=$(echo "$response" | python3 -c "
+            import sys, json
+            try:
+                data = json.load(sys.stdin)
+                print(data.get('response', 'No response found'))
+            except:
+                print('Failed to parse JSON response')
+            ")
+            model_used=$(echo "$response" | python3 -c "
+            import sys, json
+            try:
+                data = json.load(sys.stdin)
+                print(data.get('model', 'unknown'))
+            except:
+                print('unknown')
+            ")
+            created_at=$(echo "$response" | python3 -c "
+            import sys, json
+            try:
+                data = json.load(sys.stdin)
+                print(data.get('created_at', 'unknown'))
+            except:
+                print('unknown')
+            ")
+            done_status=$(echo "$response" | python3 -c "
+            import sys, json
+            try:
+                data = json.load(sys.stdin)
+                print(data.get('done', False))
+            except:
+                print('false')
+            ")
+            total_duration=$(echo "$response" | python3 -c "
+            import sys, json
+            try:
+                data = json.load(sys.stdin)
+                print(data.get('total_duration', 'unknown'))
+            except:
+                print('unknown')
+            ")
+            context=$(echo "$response" | python3 -c "
+            import sys, json
+            try:
+                data = json.load(sys.stdin)
+                context_tokens = data.get('context', [])
+                print(f'Context tokens: {len(context_tokens)} tokens')
+                if context_tokens:
+                    print('First 10 context tokens:', context_tokens[:10])
+                    print('Last 10 context tokens:', context_tokens[-10:])
+            except:
+                print('No context available')
+            ")
+          fi
+          
+          echo "════════════════════════════════════════════"
+          echo "📋 PULL REQUEST ANALYSIS:"
+          echo "$summary"
+          echo ""
+          echo "🔧 Model Used: $model_used"
+          echo "⏰ Created At: $created_at"
+          echo "✅ Completed: $done_status"
+          echo "⏱️ Total Duration: $total_duration"
+          echo ""
+          echo "💬 Full Response for Conversation Continuation:"
+          echo "Model: $model_used"
+          echo "Response: $summary"
+          echo "Context: Available for follow-up questions"
+          echo "════════════════════════════════════════════"
+      
+      - name: Post summary as PR comment
+        if: steps.get-diff.outputs.diff_ready == 'true' && github.event_name == 'pull_request'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPO_OWNER: ${{ github.repository_owner }}
+          REPO_NAME: ${{ github.event.repository.name }}
+        run: |
+          echo "📝 Posting summary as PR comment..."
+          
+          # Check if LLM response file exists
+          if [ ! -f llm_response.json ]; then
+            echo "❌ No LLM response found to post as comment"
+            exit 1
+          fi
+          
+          # Debug: Show what we got from LLM
+          echo "📋 LLM Response file contents:"
+          cat llm_response.json
+          echo ""
+          
+          # Extract and process the LLM response using Python (more robust approach)
+          python3 << 'PYTHON_EOF'
+          import json
+          import re
+          import os
+          from datetime import datetime
+          
+          print("🔍 Processing LLM response...")
+          
+          try:
+              # Read LLM response
+              with open('llm_response.json', 'r') as f:
+                  response_data = json.load(f)
+              
+              # Simple parsing - just use the response naturally
+              full_response = response_data.get('response', 'No response found')
+              model_used = response_data.get('model', 'unknown')
+              
+              print(f"✅ Successfully read LLM response: {len(full_response)} characters")
+              print(f"📱 Model used: {model_used}")
+              
+              # Get diff size
+              try:
+                  with open('pr_diff.txt', 'r') as f:
+                      diff_size = len(f.read())
+              except:
+                  diff_size = 0
+              
+              # Minimal cleaning - just remove obvious JSON artifacts if present
+              clean_response = full_response
+              if clean_response.startswith('{') and clean_response.endswith('}'):
+                  # If it looks like JSON, try to extract readable content
+                  clean_response = re.sub(r'[{}"\[\],:]', ' ', clean_response)
+                  clean_response = re.sub(r'\s+', ' ', clean_response).strip()
+              
+              # Basic cleanup of escaped characters
+              clean_response = clean_response.replace('\\n', '\n').replace('\\"', '"')
+              
+              print(f"📋 Using response: {len(clean_response)} chars")
+              
+              # Create simple, natural comment body
+              timestamp = datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')
+              
+              comment_body = "## 🤖 AI Code Review\n\n"
+              comment_body += f"{clean_response}\n\n"
+              comment_body += "---\n\n"
+              comment_body += f"*Generated by {model_used} at {timestamp} • Analyzed {diff_size} characters*\n\n"
+              comment_body += "> This analysis was automatically generated. Please review changes manually for accuracy and completeness."
+              
+              # Create JSON payload for GitHub API
+              comment_json = {"body": comment_body}
+              
+              # Write to file
+              with open('comment_body.json', 'w') as f:
+                  json.dump(comment_json, f, ensure_ascii=False, indent=2)
+              
+              print("✅ Comment body created successfully")
+              
+          except Exception as e:
+              print(f"❌ Error processing LLM response: {e}")
+              
+              # Create fallback comment
+              fallback_comment = {
+                  "body": f"## 🤖 AI Code Review\n\n❌ **Error processing LLM response**\n\nThere was an issue parsing the AI analysis. Please check the workflow logs for details.\n\nError: `{str(e)}`\n\n> This is an automated message from the AI code review workflow."
+              }
+              
+              with open('comment_body.json', 'w') as f:
+                  json.dump(fallback_comment, f, ensure_ascii=False, indent=2)
+              
+              print("⚠️ Created fallback comment due to processing error")
+          
+          PYTHON_EOF
+          
+          # Check if comment body was created
+          if [ ! -f comment_body.json ]; then
+            echo "❌ Failed to create comment body"
+            exit 1
+          fi
+          
+          echo "📤 Posting comment to GitHub..."
+          
+          # Post the comment using GitHub API
+          api_response=$(curl -s -w "HTTPSTATUS:%{http_code}" -X POST \
+            -H "Authorization: token $GITHUB_TOKEN" \
+            -H "Accept: application/vnd.github.v3+json" \
+            -H "Content-Type: application/json" \
+            "https://api.github.com/repos/$REPO_OWNER/$REPO_NAME/issues/$PR_NUMBER/comments" \
+            -d @comment_body.json)
+          
+          # Extract HTTP status code
+          http_code=$(echo "$api_response" | grep -o "HTTPSTATUS:[0-9]*" | cut -d: -f2)
+          response_body=$(echo "$api_response" | sed 's/HTTPSTATUS:[0-9]*$//')
+          
+          echo "GitHub API HTTP Status: $http_code"
+          echo "GitHub API Response: $response_body"
+          
+          # Check if comment was posted successfully
+          if [ "$http_code" -eq 201 ]; then
+            echo "✅ Comment posted successfully!"
+            
+            # Try to extract comment URL
+            comment_url=$(echo "$response_body" | python3 -c "
+            import sys, json
+            try:
+                data = json.load(sys.stdin)
+                print(data.get('html_url', 'URL not found'))
+            except:
+                print('Could not parse response for URL')
+            " 2>/dev/null || echo "URL extraction failed")
+            
+            echo "Comment URL: $comment_url"
+          else
+            echo "❌ Failed to post comment (HTTP $http_code)"
+            echo "Response: $response_body"
+            
+            # Don't exit with error for comment posting failures
+            echo "⚠️ Comment posting failed, but continuing workflow..."
+          fi
+      
+      - name: Cleanup
+        if: always()
+        run: |
+          echo "🧹 Cleaning up Ollama service..."
+          docker stop ollama-service || true
+          docker rm ollama-service || true
+          
+          echo "🧹 Cleaning up temporary files..."
+          rm -f pr_diff.txt || true
+          rm -f prompt.txt || true
+          rm -f payload.json || true
+          rm -f comment_body.json || true
+          rm -f comment_data.txt || true
+          rm -f llm_response.json || true
+          rm -f analysis_rules.txt || true
