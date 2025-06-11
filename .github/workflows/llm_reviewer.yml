@@ -164,16 +164,18 @@ jobs:
           print(json.dumps(content))
           " | sed 's/^"\(.*\)"$/\1/')
           
-          # Create the prompt
-          PROMPT="Please analyze this git diff of a pull request and provide an executive summary in less than 30 words. Focus on the main changes and their purpose.
+          # Create the prompt using a here-doc
+          cat > prompt.txt << EOF
+          Please analyze this git diff of a pull request and provide an executive summary in less than 30 words. Focus on the main changes and their purpose.
 
-Git diff:
-$DIFF_CONTENT
+          Git diff:
+          ${DIFF_CONTENT}
 
-Executive summary (less than 30 words):"
+          Executive summary (less than 30 words):
+          EOF
           
           # Escape the prompt for JSON
-          ESCAPED_PROMPT=$(echo "$PROMPT" | python3 -c "
+          ESCAPED_PROMPT=$(cat prompt.txt | python3 -c "
           import sys, json
           content = sys.stdin.read()
           print(json.dumps(content))
@@ -241,3 +243,4 @@ Executive summary (less than 30 words):"
           
           echo "🧹 Cleaning up temporary files..."
           rm -f pr_diff.txt || true
+          rm -f prompt.txt || true
