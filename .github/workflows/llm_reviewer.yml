@@ -82,40 +82,6 @@ jobs:
           echo "Verifying model installation..."
           curl -s http://localhost:11434/api/tags
       
-      - name: Test model with prompt
-        run: |
-          echo "🧪 Testing model with prompt..."
-          
-          response=$(curl -s -X POST http://localhost:11434/api/generate \
-            -H "Content-Type: application/json" \
-            -d '{
-              "model": "gemma3:1b",
-              "prompt": "hi, this is a test command, reply me with a short sentence.",
-              "stream": false
-            }')
-          
-          echo "Raw API response: $response"
-          echo ""
-          
-          # Extract the response text from JSON
-          if command -v jq >/dev/null 2>&1; then
-            model_response=$(echo "$response" | jq -r '.response // "No response found"')
-          else
-            model_response=$(echo "$response" | python3 -c "
-            import sys, json
-            try:
-                data = json.load(sys.stdin)
-                print(data.get('response', 'No response found'))
-            except:
-                print('Failed to parse JSON response')
-            ")
-          fi
-          
-          echo "════════════════════════════════"
-          echo "🤖 MODEL RESPONSE:"
-          echo "$model_response"
-          echo "════════════════════════════════"
-      
       - name: Get PR diff
         id: get-diff
         run: |
@@ -139,13 +105,13 @@ jobs:
           echo "Diff stats:"
           git diff --stat $BASE_SHA..$HEAD_SHA
           
-          # Check if diff file is too large (limit to ~8000 chars to avoid token limits)
+          # Check if diff file is too large (limit to ~100000 chars based on gemma3:1b 32k token context)
           DIFF_SIZE=$(wc -c < pr_diff.txt)
           echo "Diff size: $DIFF_SIZE characters"
           
-          if [ $DIFF_SIZE -gt 8000 ]; then
-            echo "⚠️ Diff is large ($DIFF_SIZE chars), truncating to first 8000 characters..."
-            head -c 8000 pr_diff.txt > pr_diff_truncated.txt
+          if [ $DIFF_SIZE -gt 100000 ]; then
+            echo "⚠️ Diff is large ($DIFF_SIZE chars), truncating to first 100000 characters..."
+            head -c 100000 pr_diff.txt > pr_diff_truncated.txt
             mv pr_diff_truncated.txt pr_diff.txt
             echo "...diff truncated due to size" >> pr_diff.txt
           fi
@@ -273,28 +239,6 @@ jobs:
           echo "Response: $summary"
           echo "Context: Available for follow-up questions"
           echo "════════════════════════════════════════════"
-      
-      - name: List available models
-        run: |
-          echo "📋 Available models in Ollama:"
-          models_response=$(curl -s http://localhost:11434/api/tags)
-          
-          if command -v jq >/dev/null 2>&1; then
-            echo "$models_response" | jq -r '.models[]? | "- \(.name) (Size: \(.size // "unknown"))"'
-          else
-            echo "$models_response" | python3 -c "
-            import sys, json
-            try:
-                data = json.load(sys.stdin)
-                for model in data.get('models', []):
-                    name = model.get('name', 'Unknown')
-                    size = model.get('size', 'unknown')
-                    print(f'- {name} (Size: {size})')
-            except Exception as e:
-                print(f'Error parsing models: {e}')
-                print('Raw response:', '$models_response')
-            "
-          fi
       
       - name: Cleanup
         if: always()
