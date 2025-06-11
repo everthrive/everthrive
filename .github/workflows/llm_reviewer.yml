@@ -116,6 +116,100 @@ jobs:
           echo "$model_response"
           echo "════════════════════════════════"
       
+      - name: Get PR diff
+        id: get-diff
+        run: |
+          echo "📄 Getting PR diff..."
+          
+          # Get the base and head commit SHAs
+          BASE_SHA="${{ github.event.pull_request.base.sha }}"
+          HEAD_SHA="${{ github.event.pull_request.head.sha }}"
+          
+          echo "Base SHA: $BASE_SHA"
+          echo "Head SHA: $HEAD_SHA"
+          
+          # Get the diff
+          git fetch origin $BASE_SHA
+          git fetch origin $HEAD_SHA
+          
+          # Generate diff and save to file for processing
+          git diff $BASE_SHA..$HEAD_SHA > pr_diff.txt
+          
+          # Show diff stats
+          echo "Diff stats:"
+          git diff --stat $BASE_SHA..$HEAD_SHA
+          
+          # Check if diff file is too large (limit to ~8000 chars to avoid token limits)
+          DIFF_SIZE=$(wc -c < pr_diff.txt)
+          echo "Diff size: $DIFF_SIZE characters"
+          
+          if [ $DIFF_SIZE -gt 8000 ]; then
+            echo "⚠️ Diff is large ($DIFF_SIZE chars), truncating to first 8000 characters..."
+            head -c 8000 pr_diff.txt > pr_diff_truncated.txt
+            mv pr_diff_truncated.txt pr_diff.txt
+            echo "...diff truncated due to size" >> pr_diff.txt
+          fi
+          
+          echo "diff_ready=true" >> $GITHUB_OUTPUT
+      
+      - name: Analyze PR with LLM
+        if: steps.get-diff.outputs.diff_ready == 'true'
+        run: |
+          echo "🔍 Analyzing PR with LLM..."
+          
+          # Read the diff content and escape it for JSON
+          DIFF_CONTENT=$(cat pr_diff.txt | python3 -c "
+          import sys, json
+          content = sys.stdin.read()
+          print(json.dumps(content))
+          " | sed 's/^"\(.*\)"$/\1/')
+          
+          # Create the prompt
+          PROMPT="Please analyze this git diff of a pull request and provide an executive summary in less than 30 words. Focus on the main changes and their purpose.
+
+Git diff:
+$DIFF_CONTENT
+
+Executive summary (less than 30 words):"
+          
+          # Escape the prompt for JSON
+          ESCAPED_PROMPT=$(echo "$PROMPT" | python3 -c "
+          import sys, json
+          content = sys.stdin.read()
+          print(json.dumps(content))
+          " | sed 's/^"\(.*\)"$/\1/')
+          
+          # Send to LLM
+          response=$(curl -s -X POST http://localhost:11434/api/generate \
+            -H "Content-Type: application/json" \
+            -d "{
+              \"model\": \"gemma3:1b\",
+              \"prompt\": $ESCAPED_PROMPT,
+              \"stream\": false
+            }")
+          
+          echo "Raw LLM response: $response"
+          echo ""
+          
+          # Extract the response text from JSON
+          if command -v jq >/dev/null 2>&1; then
+            summary=$(echo "$response" | jq -r '.response // "No response found"')
+          else
+            summary=$(echo "$response" | python3 -c "
+            import sys, json
+            try:
+                data = json.load(sys.stdin)
+                print(data.get('response', 'No response found'))
+            except:
+                print('Failed to parse JSON response')
+            ")
+          fi
+          
+          echo "════════════════════════════════════════════"
+          echo "📋 PULL REQUEST EXECUTIVE SUMMARY:"
+          echo "$summary"
+          echo "════════════════════════════════════════════"
+      
       - name: List available models
         run: |
           echo "📋 Available models in Ollama:"
@@ -144,3 +238,6 @@ jobs:
           echo "🧹 Cleaning up Ollama service..."
           docker stop ollama-service || true
           docker rm ollama-service || true
+          
+          echo "🧹 Cleaning up temporary files..."
+          rm -f pr_diff.txt || true
