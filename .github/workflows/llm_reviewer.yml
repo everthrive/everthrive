@@ -226,16 +226,25 @@ jobs:
           
           echo "Sending request to LLM..."
           
-          # Send to LLM
-          response=$(curl -s -X POST http://localhost:11434/api/generate \
+          # Send to LLM with timeout protection
+          response=$(curl -s -X POST \
+            --max-time 300 \
+            --connect-timeout 30 \
             -H "Content-Type: application/json" \
-            -d @payload.json)
+            -d @payload.json \
+            http://localhost:11434/api/generate)
           
-          echo "Raw LLM response: $response"
-          echo ""
-          
-          # Save response for use in comment step
-          echo "$response" > llm_response.json
+          # Check if curl succeeded
+          if [ $? -ne 0 ]; then
+            echo "❌ LLM request failed or timed out"
+            echo '{"response": "LLM request timed out after 5 minutes. Please try again.", "model": "timeout"}' > llm_response.json
+          else
+            echo "Raw LLM response: $response"
+            echo ""
+            
+            # Save response for use in comment step
+            echo "$response" > llm_response.json
+          fi
           
           # Extract and display detailed response information
           if command -v jq >/dev/null 2>&1; then
