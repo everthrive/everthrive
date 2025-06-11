@@ -193,9 +193,14 @@ jobs:
           echo "Raw LLM response: $response"
           echo ""
           
-          # Extract the response text from JSON
+          # Extract and display detailed response information
           if command -v jq >/dev/null 2>&1; then
             summary=$(echo "$response" | jq -r '.response // "No response found"')
+            model_used=$(echo "$response" | jq -r '.model // "unknown"')
+            created_at=$(echo "$response" | jq -r '.created_at // "unknown"')
+            done_status=$(echo "$response" | jq -r '.done // false')
+            total_duration=$(echo "$response" | jq -r '.total_duration // "unknown"')
+            context=$(echo "$response" | jq -r '.context // []')
           else
             summary=$(echo "$response" | python3 -c "
             import sys, json
@@ -205,11 +210,68 @@ jobs:
             except:
                 print('Failed to parse JSON response')
             ")
+            model_used=$(echo "$response" | python3 -c "
+            import sys, json
+            try:
+                data = json.load(sys.stdin)
+                print(data.get('model', 'unknown'))
+            except:
+                print('unknown')
+            ")
+            created_at=$(echo "$response" | python3 -c "
+            import sys, json
+            try:
+                data = json.load(sys.stdin)
+                print(data.get('created_at', 'unknown'))
+            except:
+                print('unknown')
+            ")
+            done_status=$(echo "$response" | python3 -c "
+            import sys, json
+            try:
+                data = json.load(sys.stdin)
+                print(data.get('done', False))
+            except:
+                print('false')
+            ")
+            total_duration=$(echo "$response" | python3 -c "
+            import sys, json
+            try:
+                data = json.load(sys.stdin)
+                print(data.get('total_duration', 'unknown'))
+            except:
+                print('unknown')
+            ")
+            context=$(echo "$response" | python3 -c "
+            import sys, json
+            try:
+                data = json.load(sys.stdin)
+                context_tokens = data.get('context', [])
+                print(f'Context tokens: {len(context_tokens)} tokens')
+                if context_tokens:
+                    print('First 10 context tokens:', context_tokens[:10])
+                    print('Last 10 context tokens:', context_tokens[-10:])
+            except:
+                print('No context available')
+            ")
           fi
           
           echo "════════════════════════════════════════════"
           echo "📋 PULL REQUEST EXECUTIVE SUMMARY:"
           echo "$summary"
+          echo ""
+          echo "🔧 Model Used: $model_used"
+          echo "⏰ Created At: $created_at"
+          echo "✅ Completed: $done_status"
+          echo "⏱️ Total Duration: $total_duration"
+          echo ""
+          echo "🧠 Context Information:"
+          echo "$context"
+          echo ""
+          echo "💬 Full Response for Conversation Continuation:"
+          echo "Model: $model_used"
+          echo "Response: $summary"
+          echo "Context: Available for follow-up questions"
           echo "════════════════════════════════════════════"
       
       - name: List available models
