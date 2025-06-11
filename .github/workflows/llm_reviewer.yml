@@ -13,21 +13,29 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
       
-      - name: Setup cache for Ollama models
-        uses: actions/cache@v4
-        with:
-          path: ~/.ollama
-          key: ollama-models-${{ runner.os }}-gemma3-1b-v1
-          restore-keys: |
-            ollama-models-${{ runner.os }}-
+      # COMMENTED OUT: Cache functionality due to permission issues
+      # TODO: Fix permission issues for future caching implementation
+      # - name: Setup cache for Ollama models
+      #   uses: actions/cache@v4
+      #   with:
+      #     path: ~/.ollama
+      #     key: ollama-models-${{ runner.os }}-gemma3-1b-v1
+      #     restore-keys: |
+      #       ollama-models-${{ runner.os }}-
       
       - name: Start Ollama service
         run: |
           echo "Starting Ollama service..."
+          # COMMENTED OUT: Volume mount for caching due to permission issues
+          # docker run -d \
+          #   --name ollama-service \
+          #   -p 11434:11434 \
+          #   -v ~/.ollama:/root/.ollama \
+          #   ollama/ollama:latest
+          
           docker run -d \
             --name ollama-service \
             -p 11434:11434 \
-            -v ~/.ollama:/root/.ollama \
             ollama/ollama:latest
           
           echo "Waiting for Ollama service to be ready..."
@@ -46,13 +54,13 @@ jobs:
           
           if echo "$models" | grep -q "gemma3:1b"; then
             echo "model_exists=true" >> $GITHUB_OUTPUT
-            echo "✅ Model gemma3:1b already exists in cache"
+            echo "✅ Model gemma3:1b already exists"
           else
             echo "model_exists=false" >> $GITHUB_OUTPUT
             echo "❌ Model gemma3:1b not found, will download"
           fi
       
-      - name: Download gemma3:1b model if not cached
+      - name: Download gemma3:1b model if not available
         if: steps.check-model.outputs.model_exists == 'false'
         run: |
           echo "📥 Downloading gemma3:1b model..."
